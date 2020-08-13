@@ -6,7 +6,7 @@ if __name__ == '__main__':
 
     cap = cv2.VideoCapture(0)
 
-    shm_w = SharedMemoryFrameWriter('frame')
+    shm_w = SharedMemoryFrameWriter('/frame')
 
     try:
         while True:

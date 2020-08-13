@@ -2,10 +2,11 @@ from ctypes import Structure, c_int32, c_int64
 
 
 class MD(Structure):
+    """Metadata for restoring frame
+    """
     _fields_ = [
-        ('shape_0', c_int32),
-        ('shape_1', c_int32),
-        ('shape_2', c_int32),
-        ('size', c_int64),
-        ('count', c_int64)
+        ('height', c_int32),
+        ('width', c_int32),
+        ('channels', c_int32),
+        ('size', c_int64)
     ]

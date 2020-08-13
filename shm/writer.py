@@ -1,60 +1,85 @@
-import numpy as np
 import mmap
 import logging
-
-from posix_ipc import Semaphore, O_CREX, ExistentialError, O_CREAT, SharedMemory, unlink_shared_memory
+import numpy as np
 from ctypes import sizeof, memmove, addressof, create_string_buffer
+
+import posix_ipc as ipc
 from shm.structures import MD
 
-
+# Create a buffer initialized to NUL bytes for metadata
 md_buf = create_string_buffer(sizeof(MD))
 
 
 class SharedMemoryFrameWriter:
+
     def __init__(self, name):
-        self.shm_region = None
         logging.info("Writer launched")
-        self.md_region = SharedMemory(name + '-meta', O_CREAT, size=sizeof(MD))
-        self.md_buf = mmap.mmap(self.md_region.fd, self.md_region.size)
-        self.md_region.close_fd()
 
-        self.shm_buf = None
-        self.shm_name = name
-        self.count = 0
+        # Name of shared memory for frame
+        self.SHM_NAME_FR = name
+        # Name of shared memory for metadata
+        self.SHM_NAME_MD = name + "_md"
+        # Name of semaphore for writing operation
+        self.SEM_NAME_RD = name + "_rd"
+        # Name of semaphore for reading operation
+        self.SEM_NAME_WR = name + "_wr"
 
+        # Map metadata into shared memory
+        self.shm_md = ipc.SharedMemory(name=self.SHM_NAME_MD, flags=ipc.O_CREAT, size=sizeof(MD))
+        self.map_md = mmap.mmap(self.shm_md.fd, self.shm_md.size)
+        self.shm_md.close_fd()
+
+        # Map frame into shared memory later
+        self.shm_fr = None
+        self.map_fr = None
+
+        # Create two binary semaphores for read/write synchronization
         try:
-            self.sem = Semaphore(name, O_CREX)
-        except ExistentialError:
-            sem = Semaphore(name, O_CREAT)
-            sem.unlink()
-            self.sem = Semaphore(name, O_CREX)
-        self.sem.release()
+            # Semaphore for reading
+            self.sem_r = ipc.Semaphore(name=self.SEM_NAME_RD, flags=ipc.O_CREX, mode=0o666, initial_value=0)
+
+            # Semaphore for writing
+            self.sem_w = ipc.Semaphore(name=self.SEM_NAME_WR, flags=ipc.O_CREX, mode=0o666, initial_value=1)
+
+        except ipc.ExistentialError:
+            # Semaphore for reading
+            sem_r = ipc.Semaphore(name=self.SEM_NAME_RD, flags=ipc.O_CREAT, mode=0o666, initial_value=0)
+            sem_r.unlink()
+            self.sem_r = ipc.Semaphore(name=self.SEM_NAME_RD, flags=ipc.O_CREX, mode=0o666, initial_value=0)
+
+            # Semaphore for writing
+            sem_w = ipc.Semaphore(name=self.SEM_NAME_WR, flags=ipc.O_CREAT, mode=0o666, initial_value=1)
+            sem_w.unlink()
+            self.sem_w = ipc.Semaphore(name=self.SEM_NAME_WR, flags=ipc.O_CREX, mode=0o666, initial_value=1)
 
     def add(self, frame: np.ndarray):
-        byte_size = frame.nbytes
-        if not self.shm_region:
-            self.shm_region = SharedMemory(self.shm_name, O_CREAT, size=byte_size)
-            self.shm_buf = mmap.mmap(self.shm_region.fd, byte_size)
-            self.shm_region.close_fd()
+        self.sem_w.acquire()
 
-        self.count += 1
-        md = MD(frame.shape[0], frame.shape[1], frame.shape[2], byte_size, self.count)
-        self.sem.acquire()
+        # Map frame into shared memory 
+        byte_size = frame.nbytes
+        if not self.shm_fr:
+            self.shm_fr = ipc.SharedMemory(name=self.SHM_NAME_FR, flags=ipc.O_CREAT, size=byte_size)
+            self.map_fr = mmap.mmap(self.shm_fr.fd, byte_size)
+            self.shm_fr.close_fd()
+
+        # Write metadata to shared memory
+        md = MD(frame.shape[0], frame.shape[1], frame.shape[2], byte_size)
         memmove(md_buf, addressof(md), sizeof(md))
-        self.md_buf[:] = bytes(md_buf)
-        self.shm_buf[:] = frame.tobytes()
-        self.sem.release()
+        self.map_md[:] = bytes(md_buf)
+
+        # Write frame to shared memory
+        self.map_fr[:] = frame.tobytes()
+
+        self.sem_r.release()
 
     def release(self):
-        self.sem.acquire()
+        self.map_md.close()
+        ipc.unlink_shared_memory(self.SHM_NAME_MD)
 
-        self.md_buf.close()
-        unlink_shared_memory(self.shm_name + '-meta')
+        self.map_fr.close()
+        ipc.unlink_shared_memory(self.SHM_NAME_FR)
 
-        self.shm_buf.close()
-        unlink_shared_memory(self.shm_name)
+        self.sem_w.close()
+        self.sem_r.close()
 
-        self.sem.release()
-        self.sem.close()
         logging.info("Writer terminated")
-
